@@ -1,0 +1,7 @@
+{
+  "name": "dsh-deepseek-chat-embed-harness",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Electron test double for the dsh desktop shell's webview lease guard.",
+  "main": "main.cjs"
+}

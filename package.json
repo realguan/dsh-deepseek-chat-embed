@@ -1,0 +1,59 @@
+{
+  "name": "dsh-deepseek-chat-embed",
+  "version": "0.1.0",
+  "description": "Embed chat.deepseek.com inside DeepSeek Harness (dsh) desktop as a Codex-style chat switcher, with a persistent login session.",
+  "type": "module",
+  "main": "src/client.js",
+  "exports": {
+    ".": "./src/client.js",
+    "./client": "./dist/dsh-deepseek-chat-embed.bundle.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "src",
+    "dist",
+    "cordis.yml",
+    "assets",
+    "docs",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build-client-bundle.mjs",
+    "prepare": "node scripts/build-client-bundle.mjs",
+    "check": "node --check src/client.js && node scripts/build-client-bundle.mjs --verify",
+    "test:entries": "node test/entries/verify.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "cordis",
+    "deepseek-chat",
+    "webview"
+  ],
+  "author": "realguan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/realguan/dsh-deepseek-chat-embed.git"
+  },
+  "homepage": "https://github.com/realguan/dsh-deepseek-chat-embed#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

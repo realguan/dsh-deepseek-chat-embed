@@ -1,0 +1,7 @@
+{
+  "name": "dsh-deepseek-chat-embed-live",
+  "private": true,
+  "version": "0.1.0",
+  "description": "End-to-end test of the plugin inside a real dsh Web UI.",
+  "main": "main.cjs"
+}

@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>dsh-deepseek-chat-embed — harness</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #f5f6f8; font: 13px -apple-system, "PingFang SC", sans-serif; }
+    #bar { height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 10px; color: #4b5563; }
+    #dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; }
+    #dot[data-phase="loaded"] { background: #22c55e; }
+    #dot[data-phase="failed"], #dot[data-phase="unsupported"] { background: #ef4444; }
+    #dot[data-phase="acquiring"], #dot[data-phase="attached"], #dot[data-phase="navigating"] { background: #f59e0b; }
+
+    /* A stand-in for the shell's `sidebar | centre | rightbar` grid. The plugin
+       must anchor the overlay to the centre pane rather than to the window;
+       window-anchoring is exactly the regression this replica exists to catch. */
+    #shell { position: absolute; inset: 28px 0 0 0; display: grid; grid-template-columns: 260px minmax(0, 1fr) 0px; }
+    #sidebar { grid-column: 1; background: #e8eaee; }
+    #centre { position: relative; background: #fff; min-width: 0; }
+    #centre-pane { position: absolute; inset: 0; }
+    [data-dockkit-pane] { grid-column: 2; }
+  </style>
+</head>
+<body>
+  <div id="bar"><span id="dot" data-phase="idle"></span><span id="status">booting</span></div>
+  <div id="shell">
+    <div id="sidebar" data-side="left" class="pI_x6G_sidebarCol"></div>
+    <div id="centre" class="pI_x6G_centerCol">
+      <div id="header" class="wSkVaW_header" style="height: 48px; border-bottom: 1px solid #e5e7eb;"></div>
+      <div id="centre-pane" style="height: calc(100% - 48px);"></div>
+    </div>
+  </div>
+
+  <!--
+    Minimal stand-in for dsh's client-modules host. The real host serves
+    /plugins/<id>/client.js and executes it as a classic same-origin script; it
+    must define window.__ModuleLoader__ *before* the bundle runs, because the
+    bundle's first statement calls it.
+  -->
+  <script>
+    window.__DSCE_TEST_HOST__ = true
+    window.__HARNESS_PHASES__ = []
+    window.__MODULE__ = undefined
+
+    // The `react` module the web frontend's staticModules seed table publishes.
+    // The plugin resolves React through the module table, so the harness must
+    // publish the same module — and must do so *before* the bundle runs.
+
+    // Minimal stand-in for dsh's `client-modules` system. The real one serves
+    // /plugins/<id>/client.js and executes it as a classic same-origin script;
+    // it must define __ModuleLoader__ *before* the bundle runs, because the
+    // bundle's first statement calls it. Its `require` is backed by the seed
+    // table, which is how a native bundle reaches React.
+    window.__ModuleLoader__ = {
+      load({ id, factory }) {
+        const record = { id, calls: 0 }
+        const require = function require(name) {
+          if (name === 'react') return window.__HARNESS_REACT__
+          throw new Error('harness: the module table has no ' + JSON.stringify(name))
+        }
+        // The real bundle banner publishes the factory's `require` as
+        // `globalThis.__dshRequire`, which is what the source reads. Without
+        // this the plugin cannot resolve React and bails out silently — exactly
+        // the failure mode this harness exists to catch.
+        globalThis.__dshRequire = require
+        try {
+          record.plugin = factory(require)
+          record.ok = true
+        } catch (error) {
+          record.ok = false
+          record.error = String(error)
+        }
+        window.__MODULE__ = record
+      },
+    }
+    window.__HARNESS_ERRORS__ = []
+    window.addEventListener('error', (event) => {
+      window.__HARNESS_ERRORS__.push('error: ' + String(event.message))
+      document.getElementById('status').textContent = 'window error: ' + event.message
+    })
+  </script>
+
+  <!-- Real React, not a stub: the previous harness called the switcher's onClick
+       programmatically and therefore never verified that a real React render
+       actually wires the click up. That gap is what this replaces. -->
+  <script src="/vendor/react.development.js"></script>
+  <script src="/vendor/react-dom.development.js"></script>
+  <script>
+    // Captured only once the UMD build has actually defined it; the module table
+    // hands this same namespace to the plugin.
+    window.__HARNESS_REACT__ = window.React
+  </script>
+  <script src="/bundle.js"></script>
+
+  <script>
+    const setStatus = (phase, detail) => {
+      window.__HARNESS_PHASES__.push([phase, detail])
+      const dot = document.getElementById('dot')
+      const status = document.getElementById('status')
+      if (dot) dot.dataset.phase = phase
+      if (status) status.textContent = phase + ' — ' + detail
+    }
+
+    /**
+     * Exercise `apply()` against a recording stub of the client context.
+     *
+     * This is the regression test for the slot contract: `register` takes
+     * `(options, component)` with the slot key in `options.name`, registration
+     * must be wrapped in `slots.inject` so it survives the slot's declaration
+     * lifecycle, and React must come from the module table.
+     */
+    function testSlotRegistration() {
+      const registrations = []
+      const injections = []
+      const injectedDeps = []
+      const effects = []
+      const disposers = []
+      const errors = []
+      const slotsStub = {
+        // Captured so the diagnostic path can be exercised directly; the plugin
+        // owns the real instance otherwise.
+        inject(key, callback) {
+          injections.push(key)
+          const disposer = callback()
+          return typeof disposer === 'function' ? disposer : () => {}
+        },
+        register(options, component) {
+          registrations.push({ options, component })
+          return () => {}
+        },
+      }
+      // The injected scope is a context too: the plugin runs every effect
+      // through it, so it must carry the same verbs.
+      const effect = (callback) => {
+        effects.push(callback)
+        const disposer = callback()
+        if (typeof disposer === 'function') disposers.push(disposer)
+        return typeof disposer === 'function' ? disposer : () => {}
+      }
+      const scope = { slots: slotsStub, effect, on: () => () => {} }
+      // The plugin news up its EmbeddedChat through the scope; intercept that by
+      // reading it back off the overlay once it exists. Nothing to intercept for
+      // now — the diagnostic probe below drives it through the real object.
+
+      const ctx = {
+        // `slots` is a service of the client runtime; the plugin defers on it
+        // with `ctx.inject`, which is the only correct way to reach it.
+        get: () => undefined,
+        inject: (deps, callback) => {
+          injectedDeps.push(deps)
+          if (!deps.includes('slots')) return () => {}
+          return callback(scope)
+        },
+        effect,
+        on: () => () => {},
+      }
+      // Observe the actual DOM rather than spying on `appendChild`: the plugin
+      // inserts through whatever `document.head` resolves to, and the assertion
+      // should hold regardless of how it gets there.
+      const stylesBefore = document.querySelectorAll('style').length
+      const headStylesBefore = document.head ? document.head.querySelectorAll('style').length : 0
+      try {
+        window.__MODULE__.plugin.apply(ctx)
+      } catch (error) {
+        errors.push(String(error))
+      }
+      const pluginStyles = [...document.querySelectorAll('style[data-dsh-deepseek-chat-embed-styles]')]
+      const stylesAfter = document.querySelectorAll('style').length
+      const stylesheets = pluginStyles.map((node) => node.textContent ?? '')
+      const first = registrations[0]
+      // Page-side only: the component is a function, so it can never ride along
+      // in the result object (the main process reads that back by structured clone).
+      window.__HARNESS_COMPONENT__ = first?.component
+      return {
+        appliedWithoutThrowing: errors.length === 0,
+        applyErrors: errors,
+        effectsRun: effects.length,
+        // The bug this guards: reaching `slots` with `ctx.get` at apply time
+        // yields nothing in the real client, so the switcher silently vanished.
+        deferredOnSlots: injectedDeps.some((deps) => deps.includes('slots')),
+        injectedDeps,
+        injectedKeys: injections,
+        registrationCount: registrations.length,
+        slotName: first?.options?.name,
+        slotId: first?.options?.id,
+        slotOrder: first?.options?.order,
+        // The bug this guards: a 3-argument call would leave `options` a string
+        // and `component` the options object.
+        optionsIsObject: typeof first?.options === 'object' && first?.options !== null,
+        componentIsFunction: typeof first?.component === 'function',
+        // The switcher must be a real React component body, not a rendered node.
+        componentName: typeof first?.component?.name === 'string' ? first.component.name : undefined,
+        stylesInjected: pluginStyles.length > 0,
+        styleBytes: stylesheets[0]?.length ?? 0,
+        stylesBefore,
+        headStylesBefore,
+        stylesAfter,
+      }
+    }
+
+    /**
+     * The overlay must be able to explain itself on screen.
+     *
+     * The packaged desktop app ships no developer tools, so when the embedded
+     * pane stays blank this block is the only channel a user can read back —
+     * it has to contain the measurements that matter.
+     */
+    function testDiagnostics() {
+      const report = { started: true }
+      try {
+        const chat = new window.__DSCE_TEST__.EmbeddedChat()
+        chat.ensureOverlay()
+        chat.setStatus('failed', 'probe failure')
+        chat.lastError = 'probe error'
+        chat.showDiagnostics('harness probe')
+        const pre = document.querySelector('.dsce-overlay .dsce-surface__diag')
+        report.present = pre !== null
+        report.visible = pre !== null && pre.hidden === false
+        const text = pre === null ? '' : (pre.textContent ?? '')
+        report.text = text
+        for (const field of ['reason', 'phase', 'error', 'bridge', 'geometry', 'overlay', 'display', 'panes', 'sidebar', 'viewport']) {
+          report[`has_${field}`] = text.includes(field)
+        }
+        chat.destroy()
+      } catch (error) {
+        report.fatal = String(error && error.stack ? error.stack : error)
+      }
+      return report
+    }
+
+    /**
+     * Render the switcher with real React and click it with real DOM events.
+     *
+     * Everything before this drove the component by calling `props.onClick`
+     * directly, which passes even when the rendered button has no working
+     * handler, is not clickable, or unmounts itself. This mounts it into the
+     * document and dispatches genuine clicks, which is how the app actually
+     * fails.
+     */
+    async function testRealRender(component) {
+      const report = { started: true }
+      const mountPoint = document.createElement('div')
+      mountPoint.id = 'switcher-host'
+      document.body.appendChild(mountPoint)
+      const errors = []
+      const onError = (event) => errors.push(String(event.message ?? event.reason ?? event))
+      window.addEventListener('error', onError)
+      window.addEventListener('unhandledrejection', onError)
+      try {
+        const root = window.ReactDOM.createRoot(mountPoint)
+        report.reactVersion = window.React.version
+        root.render(window.React.createElement(component, { sessionId: 'harness-session' }))
+        // React 18 renders asynchronously.
+        const viewDeadline = Date.now() + 5000
+        while (Date.now() < viewDeadline && mountPoint.querySelector('.dsce-switch') === null) {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        report.switcherRendered = mountPoint.querySelector('.dsce-switch') !== null
+        const segments = [...mountPoint.querySelectorAll('.dsce-switch__seg')]
+        report.segmentLabels = segments.map((el) => el.textContent)
+        const deepSeek = segments.find((el) => /deepseek/i.test(el.textContent ?? ''))
+        report.foundDeepSeek = deepSeek !== undefined
+        if (deepSeek === undefined) return report
+
+        // A real click, dispatched the way a user produces one.
+        deepSeek.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+        report.clickDispatched = true
+
+        const deadline = Date.now() + 30000
+        let overlay = null
+        while (Date.now() < deadline) {
+          overlay = document.querySelector('.dsce-overlay')
+          if (overlay !== null && overlay.dataset.dsceOpen === 'true') break
+          await new Promise((resolve) => setTimeout(resolve, 150))
+        }
+        report.overlayExists = overlay !== null
+        report.overlayOpen = overlay?.dataset.dsceOpen ?? null
+        report.clicksAfterDispatch = window.__dsceClicks__ ?? 0
+        // Wait for React 18 to flush the re-render
+        const renderDeadline = Date.now() + 3000
+        while (Date.now() < renderDeadline) {
+          const segs = [...mountPoint.querySelectorAll('.dsce-switch__seg')]
+          const ds = segs.find((el) => /deepseek/i.test(el.textContent ?? ''))
+          if (ds && ds.dataset.active === 'true') break
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        report.segmentActiveAfterClick = [...mountPoint.querySelectorAll('.dsce-switch__seg')].map(
+          (el) => `${el.textContent}:${el.dataset.active}`,
+        )
+        if (overlay === null) {
+          report.diagnosticsRendered = false
+          report.errors = errors
+          return report
+        }
+        const centerCol = document.querySelector('[class*="centerCol"]')
+        const header = document.querySelector('[class*="header"]')
+        const cRect = centerCol.getBoundingClientRect()
+        const hRect = header.getBoundingClientRect()
+        const overlayRect = overlay.getBoundingClientRect()
+        report.pane = { left: Math.round(cRect.left), top: Math.round(hRect.bottom), width: Math.round(cRect.width) }
+        report.overlay = {
+          left: Math.round(overlayRect.left),
+          top: Math.round(overlayRect.top),
+          width: Math.round(overlayRect.width),
+          height: Math.round(overlayRect.height),
+        }
+        report.matchesPane =
+          Math.abs(overlayRect.left - cRect.left) <= 2 &&
+          Math.abs(overlayRect.top - hRect.bottom) <= 2 &&
+          Math.abs(overlayRect.width - cRect.width) <= 2
+        const sidebar = document.getElementById('sidebar')
+        report.leavesSidebarVisible = overlayRect.left >= sidebar.getBoundingClientRect().right - 1
+        report.display = getComputedStyle(overlay).display
+        // Wait for the guest the click was supposed to start.
+        const guestDeadline = Date.now() + 30000
+        while (Date.now() < guestDeadline && overlay.querySelector('.dsce-surface__body webview') === null) {
+          await new Promise((resolve) => setTimeout(resolve, 200))
+        }
+        report.webviewPresent = overlay.querySelector('.dsce-surface__body webview') !== null
+        const diag = overlay.querySelector('.dsce-surface__diag')
+        report.diagnosticsRendered = diag !== null && diag.hidden === false
+        report.diagnosticsText = diag === null ? null : (diag.textContent ?? '').slice(0, 500)
+        report.errors = errors
+      } catch (error) {
+        report.fatal = String(error && error.stack ? error.stack : error)
+      } finally {
+        window.removeEventListener('error', onError)
+        window.removeEventListener('unhandledrejection', onError)
+      }
+      return report
+    }
+
+    async function run() {
+      const hooks = window.__DSCE_TEST__
+      const moduleRecord = window.__MODULE__
+      const result = {
+        errors: window.__HARNESS_ERRORS__,
+        bridgeOnWindow: typeof window.dshDesktop,
+        moduleLoaderOnWindow: typeof window.__ModuleLoader__,
+        moduleRecordPresent: moduleRecord !== undefined,
+        moduleError: moduleRecord?.error,
+        moduleLoaded: moduleRecord?.ok === true,
+        moduleId: moduleRecord?.id,
+        moduleHasApply: typeof moduleRecord?.plugin?.apply === 'function',        moduleName: moduleRecord?.plugin?.name,
+        moduleInject: moduleRecord?.plugin?.inject,
+        hooksPresent: hooks !== undefined && hooks !== null,
+        supported: hooks?.isEmbedSupported?.(),
+        bridgePresent: hooks?.desktopBrowserBridge?.() !== undefined,
+        chatUrl: hooks?.CHAT_URL,
+        workspaceKey: hooks?.WORKSPACE_KEY,
+        userAgent: hooks?.NORMALIZED_UA,
+      }
+
+      if (hooks === undefined || hooks === null) {
+        result.fatal = 'test hooks missing — the bundle did not reach the harness hook'
+        window.__HARNESS_RESULT__ = result
+        return
+      }
+
+      // 1. Contract: the switcher registers against the real slot API shape.
+      try {
+        const slotTest = moduleRecord?.plugin?.apply === undefined ? undefined : testSlotRegistration()
+        result.slot = slotTest
+
+        // 2. Diagnostics: the overlay can explain a blank pane on screen.
+        result.diagnostics = testDiagnostics()
+        if (result.diagnostics.present === true) {
+          // Leave the surface clean for the layout test that follows.
+          document.querySelector('.dsce-overlay')?.remove()
+        }
+
+        // 3. Layout: clicking the switcher must cover the centre pane only.
+        if (typeof window.__HARNESS_COMPONENT__ === 'function') {
+          result.realRender = await testRealRender(window.__HARNESS_COMPONENT__)
+          result.ok = result.realRender?.webviewPresent === true
+        }
+      } catch (error) {
+        result.phaseError = String(error && error.stack ? error.stack : error)
+      }
+
+      // 3. Guest: the standalone handshake, against the shell replica.
+      try {
+        const handle = await hooks.mountGuest({
+          container: document.getElementById('centre-pane'),
+          onStatus: (phase, detail) => setStatus(phase, detail),
+        })
+        result.mountResolved = true
+        result.guestOk = handle.ok
+        result.url = handle.currentUrl()
+        result.leaseLength = String(handle.lease).length
+        result.partitionPrefix = String(handle.partition).split('-').slice(0, 3).join('-')
+        result.phases = window.__HARNESS_PHASES__
+        result.title = await handle.element.executeJavaScript('document.title')
+        result.guestUserAgent = await handle.element.executeJavaScript('navigator.userAgent')
+        result.hasRiskControlDialog = await handle.element.executeJavaScript(
+          '/使用环境异常/.test(document.body.innerText)',
+        )
+        result.guestText = await handle.element.executeJavaScript(
+          'document.body.innerText.replace(/\\s+/g, " ").slice(0, 120)',
+        )
+        // Capture the rendered window before releasing: record the release so the
+        // main process can drive it after taking its frame.
+        window.__HARNESS_RELEASE__ = async () => {
+          await handle.close()
+          return 'released'
+        }
+        result.keptOpenForCapture = true
+      } catch (error) {
+        result.fatal = String(error && error.stack ? error.stack : error)
+        result.phases = window.__HARNESS_PHASES__
+      }
+      window.__HARNESS_RESULT__ = result
+      setStatus(result.guestOk ? 'loaded' : 'failed', result.guestOk ? 'harness complete' : 'harness incomplete')
+    }
+
+    run()
+  </script>
+</body>
+</html>

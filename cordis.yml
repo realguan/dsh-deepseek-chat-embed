@@ -1,0 +1,11 @@
+# dsh-deepseek-chat-embed bundle composition
+#
+# Inserted into the dsh web profile via:
+#   dsh plugin --profile desktop add dsh-deepseek-chat-embed
+#
+# Adds a Codex-style chat switcher to the Session header: the DSH conversation
+# and an embedded chat.deepseek.com surface, toggled per Session.
+
+- insert:
+    - id: deepseek-chat-embed
+      name: dsh-deepseek-chat-embed

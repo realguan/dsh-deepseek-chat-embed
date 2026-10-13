@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Dev-only lockfile (the plugin ships zero runtime dependencies)
+package-lock.json
+
+# Test run artifacts (written by the harness, not inputs)
+*.log
+test/harness/shot.png
+test/live/shot.png
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
