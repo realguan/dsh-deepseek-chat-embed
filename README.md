@@ -101,15 +101,36 @@ window.__DSH_CHAT_EMBED__ = {
 
 本项目原生支持 **GitHub 仓库一键安装** 与 **本地源码安装**，`package.json` 内置了纯 Node.js 标准库的 `prepare` 自动编译钩子，无需额外安装复杂的打包工具链。
 
-### 方式 1：通过 GitHub 仓库一键安装（推荐）
+---
 
-#### 在当前活动的 DSH 工作区 / Profile 中安装：
+### 方式 1：官方桌面客户端图形界面安装（推荐，零命令行）
+
+DSH 官方桌面版内置插件管理器，可直接粘贴 GitHub 仓库地址完成安装：
+
+1. 打开左侧导航的 **设置 → 插件**；
+2. 点击页面右上角的 **＋ 添加插件**；
+3. 在输入框中填入 GitHub 仓库地址：
+
+   ```
+   github:realguan/dsh-deepseek-chat-embed
+   ```
+
+4. 按需选择**安装源**（国内网络环境可选「中国大陆镜像源」）；
+5. 阅读安全提示后点击 **安装**；
+6. 安装完成后**重启客户端**生效。
+
+![官方桌面客户端图形化安装](assets/install-desktop-add-plugin.png)
+
+> ⚠️ **安全提示**：插件在本机以你的权限运行。请仅安装来源可信的插件；来源不明的插件可能损坏 DeepSeek Harness，或读取和泄露你的数据。插件安装后暂不支持自动更新，升级需先卸载再安装新版。
+
+---
+
+### 方式 2：命令行安装（DSH Dock / 自定义 Profile）
+
 ```bash
+# 安装到当前活动的 Profile
 dsh plugin add github:realguan/dsh-deepseek-chat-embed
-```
 
-#### 在指定的目标 Profile 中安装：
-```bash
 # 安装到 Web Profile（适用于 DSH Dock 及 Web 端）
 dsh plugin --profile web add github:realguan/dsh-deepseek-chat-embed
 
@@ -117,18 +138,18 @@ dsh plugin --profile web add github:realguan/dsh-deepseek-chat-embed
 dsh plugin --profile desktop add github:realguan/dsh-deepseek-chat-embed
 ```
 
-#### 使用 pnpm / npm 直接安装：
 若你在自定义的 DSH Profile 目录（如 `~/.dsh/profiles/web/`）下手动管理依赖：
+
 ```bash
 cd ~/.dsh/profiles/web
 pnpm add github:realguan/dsh-deepseek-chat-embed
 ```
 
-安装完成后，在 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 中添加 `"dsh-deepseek-chat-embed"`，重启 DSH 即可使用。
+> 通过 `pnpm add` 安装时，需在 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 中补充 `"dsh-deepseek-chat-embed"`，重启 DSH 即可使用。
 
 ---
 
-### 方式 2：从源码本地安装（开发者）
+### 方式 3：从源码本地安装（开发者）
 
 ```bash
 # 1. 克隆代码仓库
