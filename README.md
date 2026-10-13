@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![DSH Compatibility](https://img.shields.io/badge/DSH-v0.2.x-green.svg)](https://github.com/deepseek-ai)
 [![Platform](https://img.shields.io/badge/Platform-Electron%20%7C%20Tauri%20v2%20(DSH%20Dock)-orange.svg)](#-多桌面客户端适配架构desktopguestadapter-策略模式)
-[![Tests](https://img.shields.io/badge/Tests-82%2F82%20passing-brightgreen.svg)](#-开发与测试自动化门禁)
+[![Tests](https://img.shields.io/badge/Tests-81%2F81%20passing-brightgreen.svg)](#-开发与测试自动化门禁)
 
 为 **DeepSeek Harness (DSH)** 打造的专业级跨桌面端 DeepSeek 聊天无缝嵌入插件。在保持 DSH 本地 AI 编程工作流的同时，将官方 `chat.deepseek.com` 深度融合至桌面端，提供沉浸式全屏对话与右侧边栏并排协同两种工作形态。
 
@@ -158,7 +158,7 @@ dsh plugin --profile web add link:/path/to/dsh-deepseek-chat-embed
 
 ## 🧪 开发与测试（自动化门禁）
 
-本项目具备严密的测试驱动体系，代码变更受到 82 项自动化断言约束：
+本项目具备严密的测试驱动体系，代码变更受到 81 项自动化断言约束：
 
 ```bash
 # 0. 安装开发依赖（仅 jsdom 一项，用于驱动真实 React 的契约测试）
@@ -167,11 +167,11 @@ npm install
 # 1. 代码格式与 Syntax 检查
 npm run check
 
-# 2. 运行全量 82 项自动化契约回归测试
+# 2. 运行全量 81 项自动化契约回归测试
 npm run test:entries
 ```
 
-### 自动化验证测试项涵盖（82 / 82 Passed）：
+### 自动化验证测试项涵盖（81 / 81 Passed）：
 * ✅ **桌面策略模式抽象断言**：`resolveGuestAdapter` 在浏览器环境返回 `undefined`，在 Electron 下正确解析为 `ElectronGuestAdapter`，在 Tauri 下正确解析为 `TauriGuestAdapter`；
 * ✅ **几何与显隐代理断言**：`TauriGuestAdapter` 代理 `syncGeometry` 触发 `embed_chat_resize`，代理 `setVisible` 触发 `embed_chat_open` 与 `embed_chat_hide`；
 * ✅ **IPC 串行化与安全通道断言**：`embed_chat_eval` 脚本调用保证单一在途，响应通过 Request ID 精确配对，异常捕获与解析行为正确；
