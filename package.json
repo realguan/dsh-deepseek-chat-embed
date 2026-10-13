@@ -53,6 +53,14 @@
   "engines": {
     "node": ">=18"
   },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "0.2.x"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "jsdom": "^29.1.1"
   }
