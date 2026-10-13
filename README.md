@@ -212,6 +212,54 @@ npm run test:entries
 
 ---
 
+## 🔖 DSH 版本兼容性
+
+插件通过 `peerDependencies` 声明所支持的 DSH 版本范围：
+
+```json
+"peerDependencies": {
+  "@deepseek-ai/dsh": "0.2.x"
+},
+"peerDependenciesMeta": {
+  "@deepseek-ai/dsh": { "optional": true }
+}
+```
+
+### 门禁行为（已实测）
+
+| DSH 版本 | 结果 |
+| --- | --- |
+| `0.2.0-rc.2`、`0.2.1-alpha.2`、`0.2.9` 等 0.2 全系（含预发布版） | ✅ 正常加载 |
+| `0.1.x`、`0.3.x`、`1.x` | ⛔ 启动时拒绝加载，并给出明确提示 |
+
+DSH 启动时会校验该声明，版本不匹配时插件不会加载，避免在接口已变更的运行时上静默崩溃。若你确认要在不匹配的版本上强行启用，可按提示授予精确版本豁免：
+
+```bash
+dsh plugin --profile web allow-version dsh-deepseek-chat-embed@0.1.0 \
+  --dsh-version <你的 dsh 版本> --accept-risk
+```
+
+> 豁免仅对**精确的插件版本 + 精确的 DSH 版本**组合生效，且需显式 `--accept-risk` 确认风险；不匹配时 DSH 会在启动日志里直接给出这条可复制的命令。
+
+### 为什么必须加 `peerDependenciesMeta.optional`
+
+这是**必需的一步**，否则会把整个 DSH 运行时拖进 profile：
+
+* 不加 `optional` 时，pnpm 会把该 peer 当作真实依赖从 registry 解析并安装。实测会引入 `@deepseek-ai/dsh-subprocess-local`、`@google/genai`、`koffi`、`node-pty`、`protobufjs` 等整棵依赖树，且锚定**最新稳定版 `0.2.0-rc.2`**，与实际 runtime `0.2.1-alpha.2` 不一致——形成重复模块实例，属于隐患（同类于跨包私有 `Symbol` 不一致导致的作用域失效缺陷）。
+* 加 `optional` 后安装保持**零运行时依赖**：实测 GitHub 安装约 100ms 完成，`node_modules` 中仅插件自身，`prepare` 钩子仍会自动构建 bundle。
+
+### 几个不可用的范围写法（实测）
+
+| 写法 | 结果 |
+| --- | --- |
+| `^0.2.0` | ❌ `ERR_PNPM_NO_MATCHING_VERSION`：无满足的稳定版，安装直接失败（`0.2.0-rc.2` 按 semver 小于 `0.2.0`，而满足条件的 `0.2.1-alpha.2` 是预发布版，pnpm 默认不选） |
+| `workspace:^` | ❌ `ERR_PNPM_SPEC_NOT_SUPPORTED_BY_ANY_RESOLVER`：无法解析 |
+| `workspace:*` | ⚠️ 可安装，但恒等于当前 runtime 版本，**不提供任何版本保护** |
+
+> 升级到新的 DSH 大版本后，如需支持，只需修改此处范围并发布新版本即可。
+
+---
+
 ## 📄 许可证
 
 [MIT License](LICENSE) © 2026 realguan
