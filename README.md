@@ -203,6 +203,24 @@ npm run test:entries
 * ✅ **侧栏动画与互斥断言**：即时 `pointerdown` 展开联动、平滑过渡变换以及无害的标记式 DOM 启发式探测；
 * ✅ **浮层生命周期断言**（2026-10-14 现场故障）：脱流不变量写在行内（撤掉样式表也仍是 `position: fixed`）、应用期清扫残骸、`destroy()` 释放失败也摘 DOM、宿主离开视口让位、滚动只跟手不空转。
 
+### 发布流程（每次发版必须全做）
+
+```bash
+npm run build          # 1. 重建 dist —— dist 随仓库提交，消费者侧不会构建
+npm run check          # 2. 门禁：语法检查 + dist 与 src 是否同步（不同步直接失败）
+npm run test:entries   # 3. 89 项契约回归
+
+# 4. 升版本号（package.json，以及 README 里引用版本/用例数的地方）
+git commit -am "chore(release): vX.Y.Z"
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin main && git push origin vX.Y.Z
+
+# 5. 必须创建 GitHub Release —— 只打 tag 不算发版
+gh release create vX.Y.Z --title "vX.Y.Z — <一句话摘要>" --notes-file <发布说明>
+```
+
+> **约定：每次推送 tag 都必须同时创建对应的 GitHub Release。** Release 说明按「修复 / 工程 / 安装」三节写，并在正文里给出可直接粘贴的安装规格（`github:realguan/dsh-deepseek-chat-embed#vX.Y.Z`）。
+
 ---
 
 ## 💡 常见问题与说明 (FAQ)
