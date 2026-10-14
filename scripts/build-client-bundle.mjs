@@ -17,6 +17,7 @@
  *
  * Usage:
  *   node scripts/build-client-bundle.mjs            # write dist bundle
+ *   node scripts/build-client-bundle.mjs --check    # no write: fail if dist is stale
  *   node scripts/build-client-bundle.mjs --verify   # write + node --check
  */
 
@@ -105,12 +106,35 @@ return module.exports; } });
 `
 
 const bundle = banner + body + pluginExports + testHook + footer
+const byteLength = Buffer.byteLength(bundle)
 
-mkdirSync(dirname(OUT), { recursive: true })
-writeFileSync(OUT, bundle)
-console.log(`✓ wrote ${OUT} (${bundle.length} bytes, id=${PLUGIN_ID})`)
+// `--check` is the release gate, and it never writes: it fails when the
+// committed bundle no longer matches src/client.js. Since v0.1.1 dropped the
+// `prepare` hook (a git install must not have to run build scripts), nothing
+// rebuilds dist on the consumer side — without this gate a stale bundle would
+// ship silently.
+const checkOnly = process.argv.includes('--check')
 
-if (process.argv.includes('--verify')) {
+if (checkOnly) {
+  let current
+  try {
+    current = readFileSync(OUT, 'utf8')
+  } catch {
+    console.error(`✗ missing ${OUT} — run \`npm run build\` and commit the result`)
+    process.exit(1)
+  }
+  if (current !== bundle) {
+    console.error(`✗ stale ${OUT}: it does not match src/client.js — run \`npm run build\` and commit the result`)
+    process.exit(1)
+  }
+  console.log(`✓ dist in sync with src (${byteLength} bytes, id=${PLUGIN_ID})`)
+} else {
+  mkdirSync(dirname(OUT), { recursive: true })
+  writeFileSync(OUT, bundle)
+  console.log(`✓ wrote ${OUT} (${byteLength} bytes, id=${PLUGIN_ID})`)
+}
+
+if (checkOnly || process.argv.includes('--verify')) {
   const result = spawnSync(process.execPath, ['--check', OUT], { encoding: 'utf8' })
   if (result.status !== 0) {
     console.error(`✗ syntax check failed: ${OUT}`)

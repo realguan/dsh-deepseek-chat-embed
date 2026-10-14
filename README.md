@@ -99,7 +99,7 @@ window.__DSH_CHAT_EMBED__ = {
 
 ## 📦 安装与配置
 
-本项目原生支持 **GitHub 仓库一键安装** 与 **本地源码安装**，`package.json` 内置了纯 Node.js 标准库的 `prepare` 自动编译钩子，无需额外安装复杂的打包工具链。
+本项目原生支持 **GitHub 仓库一键安装** 与 **本地源码安装**。构建产物 `dist/dsh-deepseek-chat-embed.bundle.js` **随仓库提交**，`package.json` 不含任何安装期构建钩子（`prepare` 已于 v0.1.1 移除）——因此 git 安装不会触发 pnpm 的构建脚本审批，消费者侧零构建、零运行时依赖。
 
 ---
 
@@ -185,10 +185,13 @@ dsh plugin --profile web add link:/path/to/dsh-deepseek-chat-embed
 # 0. 安装开发依赖（仅 jsdom 一项，用于驱动真实 React 的契约测试）
 npm install
 
-# 1. 代码格式与 Syntax 检查
+# 1. 改过 src/client.js 后必须重建 dist —— dist 随仓库提交，消费者侧不再自动构建
+npm run build
+
+# 2. 门禁：语法检查 + 校验 dist 与 src 是否同步（不一致会直接失败，防止发出陈旧 bundle）
 npm run check
 
-# 2. 运行全量 89 项自动化契约回归测试
+# 3. 运行全量 89 项自动化契约回归测试
 npm run test:entries
 ```
 
@@ -210,6 +213,19 @@ npm run test:entries
 
 #### Q: 为什么在普通的 Web 浏览器（Chrome/Safari）里打不开内嵌？
 **A**: 因为 `chat.deepseek.com` 在 HTTP 响应头中配置了 `Content-Security-Policy: frame-ancestors 'none'`，浏览器内核从底层禁止了任何网页通过 `<iframe>` 嵌入该站点。这也是必须使用桌面宿主的原生 Webview 容器（Electron / Tauri）的根本原因。在纯浏览器环境下，插件会自动优雅呈现外部协同引导卡片。
+
+#### Q: 安装时提示 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`（或「需要允许安装脚本」）是什么原因？
+**A**: 这是 pnpm 11 的供应链策略：**git 托管的包若要执行构建脚本，必须在该 Profile 的 `pnpm-workspace.yaml` 中按“精确到 tarball（含 commit hash）”的键加入 `allowBuilds` 白名单**。本插件曾声明 `prepare` 构建钩子，因此早期版本会命中这条策略。
+
+* **v0.1.1 及以后**：已移除 `prepare`，客户端直接使用仓库中提交的 `dist/`，安装期不执行任何脚本，不会再出现该提示；
+* **v0.1.0 及更早版本**（或其它声明了构建脚本的 git 插件）：把 pnpm 报错里给出的那一行原样加入 `<profile>/pnpm-workspace.yaml` 后重新安装即可：
+
+  ```yaml
+  allowBuilds:
+    dsh-deepseek-chat-embed@https://codeload.github.com/realguan/dsh-deepseek-chat-embed/tar.gz/<报错信息中的 commit hash>: true
+  ```
+
+* 新版桌面客户端在 pnpm 把构建挂起时会给出「**允许这些脚本并重试**」；若客户端只报硬错误、没有该入口，请升级客户端，或按上面的方式手工加白名单。
 
 ---
 
@@ -247,7 +263,7 @@ dsh plugin --profile web allow-version dsh-deepseek-chat-embed@0.1.0 \
 这是**必需的一步**，否则会把整个 DSH 运行时拖进 profile：
 
 * 不加 `optional` 时，pnpm 会把该 peer 当作真实依赖从 registry 解析并安装。实测会引入 `@deepseek-ai/dsh-subprocess-local`、`@google/genai`、`koffi`、`node-pty`、`protobufjs` 等整棵依赖树，且锚定**最新稳定版 `0.2.0-rc.2`**，与实际 runtime `0.2.1-alpha.2` 不一致——形成重复模块实例，属于隐患（同类于跨包私有 `Symbol` 不一致导致的作用域失效缺陷）。
-* 加 `optional` 后安装保持**零运行时依赖**：实测 GitHub 安装约 100ms 完成，`node_modules` 中仅插件自身，`prepare` 钩子仍会自动构建 bundle。
+* 加 `optional` 后安装保持**零运行时依赖**：实测 GitHub 安装约 100ms 完成，`node_modules` 中仅插件自身；客户端直接使用仓库里已提交的 `dist/`，安装期不执行任何脚本（v0.1.1 起移除 `prepare`，见下方 FAQ）。
 
 ### 几个不可用的范围写法（实测）
 

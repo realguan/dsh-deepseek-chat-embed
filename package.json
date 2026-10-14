@@ -1,6 +1,6 @@
 {
   "name": "dsh-deepseek-chat-embed",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "在 DeepSeek Harness (dsh) 桌面端内嵌 chat.deepseek.com，提供双入口聊天面板与持久登录会话。",
   "type": "module",
   "main": "src/client.js",
@@ -31,8 +31,7 @@
   ],
   "scripts": {
     "build": "node scripts/build-client-bundle.mjs",
-    "prepare": "node scripts/build-client-bundle.mjs",
-    "check": "node --check src/client.js && node scripts/build-client-bundle.mjs --verify",
+    "check": "node --check src/client.js && node scripts/build-client-bundle.mjs --check",
     "test:entries": "node test/entries/verify.mjs"
   },
   "keywords": [
