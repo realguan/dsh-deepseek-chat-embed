@@ -858,6 +858,100 @@ function resolveGuestAdapter() {
   return undefined
 }
 
+/** 插件浮层的 DOM 标记（即使 class 被改掉也认得出是自己的残骸）。 */
+const OVERLAY_SURFACE_ATTR = 'data-dsh-deepseek-chat-embed-surface'
+
+/**
+ * 行内写入浮层的四条「脱流」不变量。
+ *
+ * 存在的理由是一次现场故障（2026-10-14）：浮层的 `position: fixed` 只写在插件
+ * 自己注入的 `<style>` 里，而那张样式表是可被 dispose 的。样式先走、浮层后走
+ * （或干脆没走）时，`.dsce-overlay` 退化成 `<body>` 末尾的普通块：
+ *
+ * - 壳的 `#root` 是 `height:100%`，浮层排在它**后面**，于是整个文档被撑高，
+ *   滚轮能把壳整页推上去 —— 用户看到的「还能继续滑、多出额外的内容」；
+ * - 那张没样式的浮层还挂着一个活着的 guest，只按自己最后拿到的
+ *   `left/top/width/height` 内联值（现场是 538x124）画成一张硬边白卡，贴在
+ *   窗口左侧、紧挨壳内容的下边缘。
+ *
+ * 实测（Chromium 155，与 Electron 同引擎）：移除样式表后 `scrollHeight` 由
+ * 789 变 913（+124，正好是该层高度），`position` 由 fixed 变 static。
+ * 所以这几条不变量必须写进行内样式：不依赖任何可被移除的样式表。
+ *
+ * @param overlay - 浮层元素。
+ */
+function markOverlaySurface(overlay) {
+  overlay.setAttribute(OVERLAY_SURFACE_ATTR, '1')
+  overlay.style.position = 'fixed'
+  overlay.style.zIndex = '200'
+  overlay.style.display = overlay.dataset.dsceOpen === 'true' ? 'block' : 'none'
+  overlay.style.overflow = 'hidden'
+  overlay.style.boxSizing = 'border-box'
+  overlay.style.background = 'var(--dsw-alias-bg-base, #ffffff)'
+  // 里面两层同理：样式表缺席时 surface 仍要铺满浮层、body 仍要有高度，否则 guest
+  // 会被压成 0 高（Chromium 实测：只补浮层不变量时 guest=538x0）。
+  const surface = overlay.firstElementChild
+  if (surface instanceof HTMLElement) {
+    surface.style.position = 'absolute'
+    surface.style.inset = '0'
+    surface.style.display = 'flex'
+    surface.style.flexDirection = 'column'
+    surface.style.background = '#ffffff'
+    const surfaceBody = surface.querySelector('.dsce-surface__body')
+    if (surfaceBody instanceof HTMLElement) {
+      surfaceBody.style.position = 'relative'
+      surfaceBody.style.flex = '1 1 auto'
+      surfaceBody.style.minHeight = '0'
+      surfaceBody.style.width = '100%'
+      surfaceBody.style.height = '100%'
+    }
+  }
+}
+
+/**
+ * 宿主盒子是否已经整体离开视口。
+ *
+ * 原生子视窗不参与页面滚动、也盖不住（DSH Dock），固定浮层同样不会自己跟手：
+ * 宿主被滚出视口后，surface 留在原地就是「悬在无关内容上方」。判定用视口四条边，
+ * 不看滚动容器是谁——内层滚动条、文档滚动都一样。
+ *
+ * @param rect - 宿主的视口矩形。
+ * @returns 是否整块离开视口。
+ */
+function hostBoxIsOffScreen(rect) {
+  if (typeof window === 'undefined') return false
+  const viewportWidth = window.innerWidth || 0
+  const viewportHeight = window.innerHeight || 0
+  if (viewportWidth === 0 && viewportHeight === 0) return false
+  return rect.bottom <= 0 || rect.top >= viewportHeight
+    || rect.right <= 0 || rect.left >= viewportWidth
+}
+
+/**
+ * 清掉插件自己留下的浮层残骸。
+ *
+ * 残骸的代价不是「多一个死节点」：它在流内会把壳的文档撑高、整页可滚，还会把
+ * 一个仍然活着的 guest 画在陌生位置（见 `markOverlaySurface`）。所以两部分都清：
+ * 应用期先扫一遍（上一次 fiber 的残骸不该等到下一次 open 才走），样式表被
+ * dispose 时再扫一遍（样式与浮层同寿）。
+ *
+ * @returns {number} 清掉的节点数。
+ */
+function sweepOverlayOrphans() {
+  if (typeof document === 'undefined') return 0
+  let removed = 0
+  try {
+    for (const stale of document.querySelectorAll(`.dsce-overlay, [${OVERLAY_SURFACE_ATTR}]`)) {
+      stale.remove()
+      removed += 1
+    }
+  } catch {
+    /* 清残骸失败不该连带把插件拖下水 */
+  }
+  if (removed > 0) report('overlay-orphans-swept', { removed })
+  return removed
+}
+
 /**
  * Owns the single embedded chat guest and its host overlay.
  *
@@ -944,10 +1038,17 @@ class EmbeddedChat {
     // the document, and a leftover element is not just dead weight: it answers
     // `document.querySelector('.dsce-overlay')` for anyone inspecting state,
     // which is how this defect hid for so long.
-    for (const stale of document.querySelectorAll('.dsce-overlay')) stale.remove()
+    sweepOverlayOrphans()
     const overlay = document.createElement('div')
     overlay.className = 'dsce-overlay'
     overlay.dataset.dsceOpen = 'false'
+    // 2026-10-14 现场故障：这一层的「脱流」原本**只**由插件自己那张 <style>
+    // 提供（`.dsce-overlay{position:fixed}`）。样式表一旦先走一步（fiber 重挂
+    // 后的第一次 open 之前、或 destroy() 中途抛错），它就退化成 <body> 末尾的
+    // 普通块：壳的文档被撑高（Chromium 实测 overflow 0 → 该层的高度）、整页可滚，
+    // 并留下一张小尺寸的聊天白卡贴在窗口左侧 —— 正是用户滚轮能一直往下滑、
+    // 「多出额外内容」的那张截图。所以把「永不在流内」写成行内不变量。
+    markOverlaySurface(overlay)
     // One compact pill, and only when the guest cannot carry itself: the
     // embedded page paints its own chrome, so a permanent status bar would just
     // be a second header stacked under dsh's.
@@ -1359,6 +1460,15 @@ class EmbeddedChat {
       this.hide()
       return
     }
+    // 滚动不改变宿主的尺寸，所以 ResizeObserver 一次都不会响：壳的文档一旦被
+    // 滚动（例如上一个 fiber 的残骸把文档撑高），surface 与宿主就静默错位；
+    // 在 DSH Dock 那条路上更糟——原生子视窗不参与页面滚动，会直接悬停在无关
+    // 内容上方。宿主离开视口就让位，回来时由本方法末尾的 open() 接回。
+    if (hostBoxIsOffScreen(rect)) {
+      // 已经藏了就别再发一次 hide（滚动会逐帧走到这里，hide 在 Dock 侧是一次 IPC）。
+      if (this.visible) this.hide()
+      return
+    }
     const band = this.chromeBottom(host)
     if (band === undefined) {
       this.setGeometry(rect.left, rect.top, rect.width, rect.height)
@@ -1373,6 +1483,36 @@ class EmbeddedChat {
       this.setGeometry(rect.left, band, rect.width, Math.max(0, rect.height - (band - rect.top)))
     }
     if (!this.visible) void this.open()
+  }
+
+  /**
+   * 滚动路径的轻量同步。
+   *
+   * 滚动事件会从任意滚动容器冒到 window 的捕获阶段（会话区、侧栏、文档本身都在
+   * 其中），逐帧跑一次完整 `syncToHost()` 太贵：那里的 `chromeBottom()` 要做文档级
+   * 查询（插件自己的历史里就有「1434 次 resize、全是同一个 rect」的教训）。所以
+   * 先只测宿主一个盒子：
+   *
+   * - 盒子没变 → 什么都不做（滚动发生在别处，surface 不需要动）；
+   * - 盒子变了 / 宿主离开视口 → 付一次完整测量，让 surface 跟手或让位。
+   */
+  syncOnScroll() {
+    const host = this.host
+    if (host === undefined || !host.isConnected) return
+    if (this.flipping === true || this.animating === true) return
+    const rect = host.getBoundingClientRect()
+    if (rect.width < 2 || rect.height < 2) return
+    if (hostBoxIsOffScreen(rect)) {
+      if (this.visible) this.hide()
+      return
+    }
+    const previous = this.geometry
+    if (previous !== undefined
+      && previous.left === Math.round(rect.left) && previous.top === Math.round(rect.top)
+      && previous.width === Math.round(rect.width) && previous.height === Math.round(rect.height)) {
+      return
+    }
+    this.syncToHost()
   }
 
   /**
@@ -1746,6 +1886,7 @@ class EmbeddedChat {
     try {
       this.ensureOverlay()
       this.overlay.dataset.dsceOpen = 'true'
+      markOverlaySurface(this.overlay)
       this.syncToHost()
     } catch (error) {
       this.lastError = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
@@ -1782,7 +1923,11 @@ class EmbeddedChat {
   /** Hide the overlay, keeping the guest alive and its login intact. */
   hide() {
     this.visible = false
-    if (this.overlay !== undefined) this.overlay.dataset.dsceOpen = 'false'
+    if (this.overlay !== undefined) {
+      this.overlay.dataset.dsceOpen = 'false'
+      // 行内 display 与属性双写：样式表缺席时也要真的藏起来（见 markOverlaySurface）。
+      markOverlaySurface(this.overlay)
+    }
     if (this.handle !== undefined && typeof this.handle.setVisible === 'function') {
       void this.handle.setVisible(false).catch(() => {})
     } else {
@@ -1952,11 +2097,22 @@ class EmbeddedChat {
     this.destroyed = true
     const handle = this.handle
     this.handle = undefined
-    if (handle !== undefined) await handle.close()
-    if (this.overlay !== undefined) {
-      this.overlay.remove()
-      this.overlay = undefined
-      this.guestHost = undefined
+    // 顺序就是判据：先摘 DOM，再放租约。反过来的话，`close()` 一旦抛错或挂起，
+    // 浮层就永远留在页面里——而同一批 effect 已经把样式表撤了，留下的正好是
+    // 「入流的无样式浮层」（2026-10-14 现场故障）。租约即便放失败，也只是晚一点
+    // 被壳回收，不该拿页面布局陪葬。
+    const overlay = this.overlay
+    this.overlay = undefined
+    this.guestHost = undefined
+    this.releaseObserver()
+    this.releaseChromeWatch()
+    if (overlay !== undefined) overlay.remove()
+    if (handle !== undefined) {
+      try {
+        await handle.close()
+      } catch (error) {
+        report('destroy-close-failed', { message: String(error?.message ?? error).slice(0, 200) })
+      }
     }
   }
 }
@@ -2411,7 +2567,15 @@ export default {
         style.dataset.dshDeepseekChatEmbedStyles = '1'
         style.textContent = STYLES
         ;(document.head ?? document.documentElement).append(style)
-        return () => style.remove()
+        // 应用期就扫一遍残骸，而不是等到下一次 open()：等不到 open 的残骸会让
+        // 壳的文档整页可滚（见 markOverlaySurface 的实测）。
+        sweepOverlayOrphans()
+        return () => {
+          style.remove()
+          // 样式表与浮层同寿：样式先走而浮层留下 = 入流的无样式白卡 + 整页可滚。
+          // 这里直接按 DOM 标记清，不依赖 destroy() 的调用顺序或成败。
+          sweepOverlayOrphans()
+        }
       })
 
       const chat = new EmbeddedChat()
@@ -2424,6 +2588,21 @@ export default {
         const onLayout = () => chat.syncToHost()
         window.addEventListener('resize', onLayout)
         document.addEventListener('fullscreenchange', onLayout)
+        // 滚动不改尺寸，所以 ResizeObserver 不会响，但宿主的**视口坐标**会变。
+        // 壳的文档一旦被滚动（内容溢出、或上一个 fiber 的残骸撑高），不补这一路
+        // 就会让 surface / 原生子视窗停在旧位置（2026-10-14 现场故障的第二个面）。
+        let scrollQueued = false
+        const onScroll = () => {
+          if (scrollQueued) return
+          scrollQueued = true
+          const run = () => {
+            scrollQueued = false
+            chat.syncOnScroll()
+          }
+          if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run)
+          else setTimeout(run, 16)
+        }
+        window.addEventListener('scroll', onScroll, { passive: true, capture: true })
         let observer
         if (typeof ResizeObserver === 'function') {
           observer = new ResizeObserver(onLayout)
@@ -2439,6 +2618,7 @@ export default {
         const settle = setTimeout(onLayout, 600)
         return () => {
           window.removeEventListener('resize', onLayout)
+          window.removeEventListener('scroll', onScroll, { capture: true })
           document.removeEventListener('fullscreenchange', onLayout)
           clearTimeout(settle)
           if (observer !== undefined) observer.disconnect()

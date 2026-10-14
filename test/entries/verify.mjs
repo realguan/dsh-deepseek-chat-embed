@@ -116,6 +116,12 @@ const dom = new JSDOM(HTML, {
 const win = dom.window
 const doc = win.document
 
+// 视口必须和本文件建模的壳同尺寸（FRAME = 1440x900）。jsdom 默认 1024x768，
+// 会让 DOCK_BODY（left=1100）在模型里落到「视口外」——插件现在据此让位
+// （见 syncToHost 的离屏判定），守卫就会替我们制造一个假故障。
+Object.defineProperty(win, 'innerWidth', { value: FRAME.width, configurable: true })
+Object.defineProperty(win, 'innerHeight', { value: FRAME.height, configurable: true })
+
 /** Rects jsdom cannot compute (no layout engine), keyed by selector. */
 const RECTS = [
   ['[data-shell-frame]', FRAME],
@@ -1265,6 +1271,106 @@ async function main() {
       )
       delete win.__TAURI__
     }
+  }
+
+  // ---- surface 生命周期：样式表走了，浮层必须跟着走 ---------------------------
+  //
+  // 2026-10-14 现场故障：`.dsce-overlay` 的 `position: fixed` 原本**只**由插件自己
+  // 注入、且可被 dispose 的 <style> 提供。样式先走一步时，它退化成 <body> 末尾的
+  // 普通块：壳的文档被撑高、整页可滚，并按旧 geometry 留下一张硬边白卡（Chromium
+  // 实测 scrollHeight +124、position 由 fixed 变 static）。这里钉住四件事：不变量是
+  // 行内的、离屏宿主让位、destroy 失败也不留 DOM、应用期就扫残骸。
+  {
+    const face = win.__DSCE_TEST__
+    const pane = doc.createElement('div')
+    pane.className = 'X_paneRoot'
+    const host = doc.createElement('div')
+    host.className = 'dsce-dock-body'
+    pane.appendChild(host)
+    doc.body.appendChild(pane)
+    const entry = RECTS.find(([selector]) => selector === '.dsce-dock-body')
+    const home = entry[1]
+
+    const chat = new face.EmbeddedChat()
+    chat.attach(host)
+    await until(() => chat.overlay !== undefined && chat.overlay.dataset.dsceOpen === 'true')
+    const surface = chat.overlay
+    check(
+      'the surface carries its out-of-flow invariants inline, not only in the stylesheet',
+      surface !== undefined && surface.style.position === 'fixed' && surface.style.display === 'block'
+        && surface.style.overflow === 'hidden' && surface.style.zIndex === '200',
+      JSON.stringify({ position: surface?.style.position, display: surface?.style.display, zIndex: surface?.style.zIndex }),
+    )
+
+    // 样式表被撤掉（dispose 的第一步）之后，浮层仍然在流外。
+    const style = doc.querySelector('style[data-dsh-deepseek-chat-embed-styles]')
+    const css = style?.textContent
+    style?.remove()
+    check(
+      'removing the plugin stylesheet cannot push the surface into the document flow',
+      surface?.style.position === 'fixed',
+      String(surface?.style.position),
+    )
+    if (css !== undefined) {
+      const restored = doc.createElement('style')
+      restored.dataset.dshDeepseekChatEmbedStyles = '1'
+      restored.textContent = css
+      doc.head.appendChild(restored)
+    }
+
+    // 离屏宿主必须让位：原生子视窗不随页面滚动，固定浮层也不会自己跟手。
+    entry[1] = { ...home, top: -home.height - 24 }
+    chat.syncToHost()
+    check(
+      'a host scrolled out of the viewport hands the surface back',
+      chat.isOpen() === false && surface?.dataset.dsceOpen === 'false',
+      String(surface?.dataset.dsceOpen),
+    )
+    entry[1] = home
+    chat.syncToHost()
+    check('a host back in the viewport re-opens the surface', chat.isOpen() === true)
+
+    // 滚动路径：盒子没动就不重算（避免逐帧付一次文档级查询），动了才跟手。
+    const settled = JSON.stringify(chat.geometry ?? null)
+    chat.syncOnScroll()
+    check(
+      'a scroll that did not move the host rewrites nothing',
+      JSON.stringify(chat.geometry ?? null) === settled,
+      settled,
+    )
+    entry[1] = { ...home, top: home.top - 40 }
+    chat.syncOnScroll()
+    check(
+      'a scroll that moved the host pulls the surface with it',
+      chat.geometry !== undefined && Math.round(chat.geometry.top) === home.top - 40,
+      JSON.stringify(chat.geometry ?? null),
+    )
+    entry[1] = home
+    chat.syncToHost()
+
+    // 释放 guest 失败也不许把 DOM 留在页面里（destroy 先摘 DOM、再放租约）。
+    chat.handle = { close: async () => { throw new Error('release failed') } }
+    await chat.destroy()
+    check(
+      'destroy() removes the surface even when releasing the guest fails',
+      surface !== undefined && surface.isConnected === false && chat.overlay === undefined,
+      String(surface?.isConnected),
+    )
+
+    // 应用期清扫：连 class 被改掉的残骸（只认插件自己的 DOM 标记）也要清。
+    const orphan = doc.createElement('div')
+    orphan.setAttribute('data-dsh-deepseek-chat-embed-surface', '1')
+    doc.body.appendChild(orphan)
+    const fresh = new face.EmbeddedChat()
+    fresh.ensureOverlay()
+    check(
+      'a leftover surface from an earlier fiber is swept before the next one is built',
+      orphan.isConnected === false && fresh.overlay !== undefined && fresh.overlay.isConnected === true,
+      `orphan=${orphan.isConnected}`,
+    )
+    fresh.overlay?.remove()
+    entry[1] = home
+    pane.remove()
   }
 
   const failed = checks.filter((entry) => !entry.ok)

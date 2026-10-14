@@ -263,3 +263,57 @@ overlay : {left: 260, top: 28, width: 1100, height: 735}
    - **`CustomNativeGuestAdapter`**：开放给任何遵循 `window.__DSH_CHAT_EMBED__` 的第三方多视窗桌面壳；
    - **`resolveGuestAdapter()`**：按环境自适应探测当前宿主并返回单例策略，若均不可用则优雅降级为 Web 伴侣/引导视图。
 
+
+---
+
+## 10. 浮层的脱流不变量：不能只靠那张可被 dispose 的 `<style>`（2026-10-14 现场故障）
+
+### 现象
+
+Electron 桌面版上，滚轮能把**整个壳页面**推上去，壳内容下方露出「额外的内容」；
+同一张截图里，聊天只剩一张 **538x124** 的白卡：硬边、无圆角、无阴影，贴在壳
+`#root` 的下边缘、窗口最左侧，里面的 chat.deepseek.com 按 538 宽重排过（紧凑头部 +
+被切一半的快捷胶囊）。
+
+### 根因
+
+`.dsce-overlay` 的「脱流」原本**只**由插件自己注入的 `<style>` 提供
+（`.dsce-overlay{position:fixed}`），而那张样式表是可被 dispose 的：
+
+- 样式先走、浮层后走（或没走）时，`.dsce-overlay` 退化成 `<body>` 末尾的普通块；
+- 壳的 `html,body,#root{height:100%}`、frame 又是 `height:100%;overflow:hidden`，
+  所以多出来的那一块**只能**来自 `#root` 之后的节点——正是浮层；
+- 于是壳的文档被撑高（整页可滚），浮层按自己最后拿到的 `left/top/width/height`
+  内联值画成那张白卡，里面还挂着一个**仍然活着**的 guest（租约没释放）。
+
+Chromium 155（与 Electron 同引擎）实测，同样的 DOM + 同一份 CSS：
+
+| | `scrollHeight - innerHeight` | 浮层 `position` | guest 盒 |
+| --- | --- | --- | --- |
+| 样式表在场 | 0 | `fixed` | 538x124 |
+| 样式表撤走（修前） | **124** | **`static`** | 538x0 |
+| 样式表撤走（修后） | 0 | `fixed` | 538x124 |
+
+### 修法（四条，缺一条就还能复现）
+
+1. **行内不变量**：`markOverlaySurface()` 把 `position/z-index/display/overflow/
+   box-sizing/background` 写成行内样式，并给 surface / surface body 同样补上行内
+   盒模型——不依赖任何可被移除的样式表；
+2. **同寿**：样式表的 effect 清理里顺手按 DOM 标记（`data-dsh-deepseek-chat-embed-surface`）
+   清掉浮层残骸，不依赖 `destroy()` 的调用顺序与成败；
+3. **应用期清扫**：`apply()` 一进来就扫残骸（旧的只在 `open()` 里扫，等不到
+   `open()` 的残骸就一直撑着文档）；
+4. **`destroy()` 先摘 DOM 再放租约**，并吞掉 release 失败——反过来一旦 release
+   抛错/挂起，就正好留下「入流的无样式浮层」。
+
+### 附带修掉的两个面
+
+- **宿主离开视口要让位**：原生子视窗不参与页面滚动、固定浮层也不会自己跟手。
+  宿主滚出视口即 `hide()`，回来由 `syncToHost()` 末尾的 `open()` 接回；
+- **滚动不触发 `ResizeObserver`**（尺寸没变），所以补一条 `scroll` 捕获监听：
+  rAF 节流 + 只测宿主一个盒子，盒子没变就不重算（`chromeBottom()` 是文档级查询，
+  逐帧跑就是插件自己记过的「1434 次 resize、全同一个 rect」那类事故）。
+
+DSH Dock（原生子视窗）侧同口径的防线在 `dsh-dock` 的
+`commands/chat_embed.rs::rect_is_placeable`：退化 rect（0 宽/0 高/NaN）一律让位，
+不再按「最小 100x100」摆一张谁也点不动的白卡。

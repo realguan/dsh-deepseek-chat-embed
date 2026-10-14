@@ -22,6 +22,12 @@ LIVE_URL='http://127.0.0.1:3080/?token=…' "$ELECTRON" test/live
 点击是打开标签还是收起右栏、标签体在可见/切走时对聊天 surface 的接管与让位。
 详见 `entries/verify.mjs` 顶部的说明。
 
+2026-10-14 起还钉住 surface 的生命周期（现场故障：样式表先走一步，浮层退化成
+`<body>` 里的普通块，把壳的文档撑高、整页可滚，并留下一张 538x124 的白卡）：
+脱流不变量走行内样式（撤掉插件样式表也仍是 `position: fixed`）、应用期清扫残骸、
+`destroy()` 在释放 guest 失败时也必须摘 DOM、宿主离开视口让位、滚动只跟手不空转。
+详见 `docs/embedding-contract.md` §10。
+
 ## `harness/`
 
 桌面壳租约门禁的**忠实复刻**（逐行对应 `@deepseek-ai/dsh-desktop` 0.2.0-rc.2
