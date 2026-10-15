@@ -928,6 +928,89 @@ function hostBoxIsOffScreen(rect) {
 }
 
 /**
+ * 把动作压到下一帧执行，连续触发一帧最多跑一次。
+ *
+ * chrome / modal / scroll 三条突发路径共用。它们都可能在一次交互里连触发数次，
+ * 而每次的成本是一次文档级测量（`chromeBottom`）或强制重排——逐次全跑就是插件
+ * 自己记过的「1434 次 resize、全同一个 rect」那类事故，同 Dock 里其它 pane
+ * 都要替我们付账。没有 rAF 的环境退化成 16ms 定时器。
+ *
+ * @param {() => void} run - 实际要执行的动作。
+ * @returns {() => void} 节流后的触发函数（可安全重复调用）。
+ */
+function frameThrottle(run) {
+  let queued = false
+  return () => {
+    if (queued) return
+    queued = true
+    const fire = () => {
+      queued = false
+      run()
+    }
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fire)
+    else setTimeout(fire, 16)
+  }
+}
+
+/** 模态弹窗选择器：命中任何独占前台、具有遮罩属性或系统弹窗角色的容器 */
+const MODAL_DIALOG_SELECTOR =
+  '[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"], [data-shortcut-modal], dialog[open]'
+
+/**
+ * 页面里是否存在**活动状态**的模态弹窗（设置外壳、通用 Modal、确认弹窗等）。
+ *
+ * 这是原始事实判定，不含策略：「有模态开着」不等于「一定压住我们的宿主」——
+ * 策略在 {@link EmbeddedChat#modalBlocksHost}。两者分开，是因为将来若出现
+ * 不遮全屏的模态（如只盖左栏的抽屉），只需改策略一处。
+ *
+ * 2026-10-15 现场故障：DSH Dock 下 DeepSeek Chat 是原生子视窗（WKWebView/NSView），
+ * 位于主窗口原生图层之上，不受 DOM z-index 约束。当用户打开「设置」等居中弹窗时，
+ * 800px 宽的弹窗卡片右半部分被展开的聊天白底完全遮挡，且右侧点击无法穿透至遮罩。
+ *
+ * 判定依据：
+ * - DSH 的所有阻断性模态（SettingsPanel、primitives 的 Modal、Onboarding 等）
+ *   均在 document.body 下挂载带 `role="dialog"` 且 `aria-modal="true"`，或带有 `data-shortcut-modal`；
+ * - 排除插件自身持有的浮层与宿主节点（自己的 surface 不构成对自己的遮挡）；
+ * - 确保节点真实挂载、未被 hidden/inert，且未处于 display:none。
+ *
+ * 成本：一次 document 级 `querySelectorAll`（属性选择器，不触发重排）。
+ *
+ * @param {Document | undefined} doc - 页面文档对象。
+ * @returns {boolean} 是否存在活动模态弹窗。
+ */
+function anyModalActive(doc) {
+  if (typeof doc === 'undefined' || !doc || !doc.body) return false
+  let dialogs
+  try {
+    dialogs = doc.querySelectorAll(MODAL_DIALOG_SELECTOR)
+  } catch {
+    return false
+  }
+  for (let i = 0; i < dialogs.length; i++) {
+    const el = dialogs[i]
+    if (!(el instanceof Element)) continue
+    // 排除插件自身的浮层或宿主内部节点
+    if (el.closest('.dsce-overlay') || el.closest('.dsce-dock-body') || el.closest('.dsce-main-panel')) {
+      continue
+    }
+    // 确保元素真正在文档中
+    if (!el.isConnected) continue
+    // 检查隐藏属性
+    if (el.hasAttribute('hidden') || el.getAttribute('aria-hidden') === 'true') continue
+    if (el.closest?.('[hidden], [inert]')) continue
+    // 检查计算样式（若宿主环境支持）
+    if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+      try {
+        const style = window.getComputedStyle(el)
+        if (style && (style.display === 'none' || style.visibility === 'hidden')) continue
+      } catch {}
+    }
+    return true
+  }
+  return false
+}
+
+/**
  * 清掉插件自己留下的浮层残骸。
  *
  * 残骸的代价不是「多一个死节点」：它在流内会把壳的文档撑高、整页可滚，还会把
@@ -984,6 +1067,7 @@ class EmbeddedChat {
     /** @type {number | undefined} */ this.chromeInset = undefined
     /** @type {ReturnType<typeof setTimeout>[] | undefined} */ this.chromeTimers = undefined
     /** @type {MutationObserver | undefined} */ this.chromeObserver = undefined
+    /** @type {MutationObserver | undefined} */ this.modalObserver = undefined
     /** @type {number | undefined} */ this.guestEvalFailureAt = undefined
   }
 
@@ -1100,6 +1184,7 @@ class EmbeddedChat {
     }
     this.syncToHost()
     this.watchChrome(host)
+    this.watchModal(host)
     this.reportDockDom(host)
   }
 
@@ -1151,19 +1236,9 @@ class EmbeddedChat {
     // cold open at 150/500/1200/2500/4500ms.
     const chromeRow = chromeRowOf(host)
     if (chromeRow === undefined) return
-    let queued = false
-    this.chromeObserver = new MutationObserver(() => {
-      // Chrome renders in bursts; one re-measure per frame is enough, and a
-      // measure is a handful of rects.
-      if (queued) return
-      queued = true
-      const run = () => {
-        queued = false
-        remeasure()
-      }
-      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run)
-      else setTimeout(run, 16)
-    })
+    // Chrome renders in bursts; one re-measure per frame is enough, and a
+    // measure is a handful of rects. (Debounce lives in frameThrottle.)
+    this.chromeObserver = new MutationObserver(frameThrottle(remeasure))
     try {
       // `subtree` only when the row cannot hold the tab bodies. When the strip
       // sits directly under the dock's tab host, that host is the row — and its
@@ -1186,6 +1261,42 @@ class EmbeddedChat {
     if (this.chromeObserver !== undefined) {
       this.chromeObserver.disconnect()
       this.chromeObserver = undefined
+    }
+  }
+
+  /**
+   * 监听模态弹窗（设置外壳、通用 Modal、确认弹窗等）的进场与退场。
+   *
+   * 弹窗经 React Portal 挂在 `document.body` 下，所以只看 body 的**直接**子节点、
+   * 不开 `subtree`——深监听会撞上「终端每写一行就触发一次文档级重排」那类事故
+   * （`watchChrome` 的同款教训，实测 1434 次 resize 全同一个 rect）。
+   *
+   * 这里**不解析变动节点、不猜 class 名**：DSH 的弹窗 DOM 是上游私有结构，
+   * 任何选择器猜测（`[class*="overlay"]` 之类）都会在上游改版时静默失效。
+   * 本监听只负责「body 直接子节点变了 → 去重新判定」，判定本身在
+   * {@link anyModalActive}，与滚动/缩放路径共用同一套语义。
+   *
+   * @param {HTMLElement} host - 当前宿主节点。
+   */
+  watchModal(host) {
+    this.releaseModalWatch()
+    const doc = host?.ownerDocument ?? (typeof document !== 'undefined' ? document : undefined)
+    if (!doc || typeof MutationObserver !== 'function') return
+    const target = doc.body ?? doc.documentElement
+    if (!target) return
+    this.modalObserver = new MutationObserver(frameThrottle(() => this.syncToHost()))
+    try {
+      this.modalObserver.observe(target, { childList: true, subtree: false })
+    } catch {
+      /* 监听失败不该连锁拖垮插件；scroll/resize 路径仍会兜底重新判定 */
+    }
+  }
+
+  /** 停止模态弹窗监听。 */
+  releaseModalWatch() {
+    if (this.modalObserver !== undefined) {
+      this.modalObserver.disconnect()
+      this.modalObserver = undefined
     }
   }
 
@@ -1435,6 +1546,30 @@ class EmbeddedChat {
       this.animatingFrame = undefined
     }
     this.releaseChromeWatch()
+    this.releaseModalWatch()
+  }
+
+  /**
+   * 弹窗在场时 surface 必须让位——这是本插件的一条不变量，三个入口
+   * （`syncToHost` / `open` / `syncOnScroll`）都经由此处判定，不各写一遍。
+   *
+   * **按宿主类型分流，不是所有壳都需要让位**：
+   * - `tauri` / `custom`：聊天是原生子视窗，物理图层压在主页 Webview 之上，
+   *   页面里的任何遮罩与 z-index 都盖不住它（2026-10-15 故障）——必须让位；
+   * - `electron`：聊天是 DOM `<webview>`，住在 `.dsce-overlay`（z-index 200）里，
+   *   而官方设置遮罩是 z-index 1000，**天然就盖在它上面**，聊天在遮罩下依稀可见
+   *   正是官方交互。此时若 hide()，反而会把聊天整个弄消失（`hide` 会把 overlay
+   *   的 display 置为 none，Electron 侧 setVisible 是 no-op）——那是回归，不是修复；
+   * - 无 adapter（web profile）：根本没有 guest，浮层同样是 DOM，同理不需要。
+   *
+   * @returns {boolean} 当前是否有模态弹窗要求 surface 让位。
+   */
+  modalBlocksHost() {
+    const adapter = resolveGuestAdapter()
+    if (adapter === undefined || adapter.id === 'electron') return false
+    const doc = this.host?.ownerDocument
+      ?? (typeof document !== 'undefined' ? document : undefined)
+    return anyModalActive(doc)
   }
 
   /**
@@ -1465,6 +1600,13 @@ class EmbeddedChat {
     // 在 DSH Dock 那条路上更糟——原生子视窗不参与页面滚动，会直接悬停在无关
     // 内容上方。宿主离开视口就让位，回来时由本方法末尾的 open() 接回。
     if (hostBoxIsOffScreen(rect)) {
+      // 已经藏了就别再发一次 hide（滚动会逐帧走到这里，hide 在 Dock 侧是一次 IPC）。
+      if (this.visible) this.hide()
+      return
+    }
+    // 弹窗在场即让位（判定与理由见 modalBlocksHost）。弹窗关闭后由
+    // watchModal 的同一路监听触发 syncToHost，走到方法末尾的 open() 接回。
+    if (this.modalBlocksHost()) {
       // 已经藏了就别再发一次 hide（滚动会逐帧走到这里，hide 在 Dock 侧是一次 IPC）。
       if (this.visible) this.hide()
       return
@@ -1503,6 +1645,13 @@ class EmbeddedChat {
     const rect = host.getBoundingClientRect()
     if (rect.width < 2 || rect.height < 2) return
     if (hostBoxIsOffScreen(rect)) {
+      if (this.visible) this.hide()
+      return
+    }
+    // 弹窗让位判定放在「盒子没变」之前：`anyModalActive` 只是一次属性选择器
+    // querySelectorAll，不触发重排，远比本方法要规避的 `chromeBottom()` 便宜；
+    // 而它同时是「宿主无 MutationObserver 时」唯一还能发现弹窗进场的路径。
+    if (this.modalBlocksHost()) {
       if (this.visible) this.hide()
       return
     }
@@ -1882,6 +2031,12 @@ class EmbeddedChat {
    */
   async open() {
     if (this.destroyed) return
+    // 弹窗在场不得开surface（判定见 modalBlocksHost）。已经藏着就不用再发一次
+    // hide——那在 Dock 侧是一次白跑的 IPC。
+    if (this.modalBlocksHost()) {
+      if (this.visible) this.hide()
+      return
+    }
     this.visible = true
     try {
       this.ensureOverlay()
@@ -2591,17 +2746,8 @@ export default {
         // 滚动不改尺寸，所以 ResizeObserver 不会响，但宿主的**视口坐标**会变。
         // 壳的文档一旦被滚动（内容溢出、或上一个 fiber 的残骸撑高），不补这一路
         // 就会让 surface / 原生子视窗停在旧位置（2026-10-14 现场故障的第二个面）。
-        let scrollQueued = false
-        const onScroll = () => {
-          if (scrollQueued) return
-          scrollQueued = true
-          const run = () => {
-            scrollQueued = false
-            chat.syncOnScroll()
-          }
-          if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run)
-          else setTimeout(run, 16)
-        }
+        // 节流见 frameThrottle：滚动事件会从任意容器冒到 window 捕获阶段。
+        const onScroll = frameThrottle(() => chat.syncOnScroll())
         window.addEventListener('scroll', onScroll, { passive: true, capture: true })
         let observer
         if (typeof ResizeObserver === 'function') {

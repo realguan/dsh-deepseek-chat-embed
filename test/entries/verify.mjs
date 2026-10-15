@@ -1373,6 +1373,135 @@ async function main() {
     pane.remove()
   }
 
+  // ---- 模态弹窗在场让位（2026-10-15 现场故障：设置弹窗被原生子视窗遮挡） ------
+  //
+  // 现场：DSH Dock 侧原生子视窗（WKWebView）挂在顶层 NSView，DOM 层的遮罩与
+  // z-index 盖不住它。用户打开「设置」弹窗时，居中 800px 弹窗右半边被子视窗白底遮挡。
+  // 必须保证：
+  // 1. 模态弹窗挂载时，子视窗与 surface 立即让位（hide，dsceOpen="false"）；
+  // 2. 模态弹窗在场期间，调用 open() 亦被拒绝；
+  // 3. 模态弹窗卸载后，同一路监听自动恢复子视窗与 surface（open，dsceOpen="true"）；
+  // 4. 普通非模态元素（无 dialog/modal 角色）进出不影响正常展示。
+  {
+    const face = win.__DSCE_TEST__
+    const pane = doc.createElement('div')
+    pane.className = 'X_paneRoot'
+    const host = doc.createElement('div')
+    host.className = 'dsce-dock-body'
+    pane.appendChild(host)
+    doc.body.appendChild(pane)
+    const entry = RECTS.find(([selector]) => selector === '.dsce-dock-body')
+    const home = entry[1]
+
+    const chat = new face.EmbeddedChat()
+    chat.attach(host)
+    await until(() => chat.overlay !== undefined && chat.overlay.dataset.dsceOpen === 'true')
+    check('chat is initially open and visible', chat.isOpen() === true && chat.overlay?.dataset.dsceOpen === 'true')
+
+    // 普通元素（如侧栏菜单或一般内容）插入 body，不影响聊天浮层
+    const nonModal = doc.createElement('div')
+    nonModal.className = 'normal-banner'
+    doc.body.appendChild(nonModal)
+    chat.syncToHost()
+    check('non-modal element does not block chat surface', chat.isOpen() === true)
+    nonModal.remove()
+
+    // ---- Tauri 环境（DSH Dock）：原生子视窗盖不住遮罩，必须让位 ----------------
+    // 显式给出 __TAURI__ 桥：modalBlocksHost() 按宿主类型分流，无桥（web profile）
+    // 与 Electron 都不让位，只有 tauri/custom 这类「聊天跑在原生视窗里」的壳才让。
+    win.__TAURI__ = {
+      core: {
+        invoke: async (name) => {
+          if (name === 'embed_chat_hide') return undefined
+          return undefined
+        },
+      },
+    }
+    check('in Tauri environment, resolveGuestAdapter resolves TauriGuestAdapter', face.resolveGuestAdapter()?.id === 'tauri')
+
+    // 挂载设置弹窗浮层（模拟 DSH SettingsPanel 挂载至 document.body）
+    const modalOverlay = doc.createElement('div')
+    modalOverlay.className = 'VOzbGW_overlay'
+    modalOverlay.setAttribute('role', 'presentation')
+    const modalPanel = doc.createElement('div')
+    modalPanel.className = 'VOzbGW_panel'
+    modalPanel.setAttribute('role', 'dialog')
+    modalPanel.setAttribute('aria-modal', 'true')
+    modalPanel.setAttribute('data-shortcut-modal', 'settings')
+    modalOverlay.appendChild(modalPanel)
+    doc.body.appendChild(modalOverlay)
+
+    // 弹窗在场时必须让位：表面收起、子视窗 hide
+    chat.syncToHost()
+    check(
+      'an active modal dialog hides the chat surface',
+      chat.isOpen() === false && chat.overlay?.dataset.dsceOpen === 'false',
+      String(chat.overlay?.dataset.dsceOpen),
+    )
+
+    // 弹窗在场时，尝试直接调用 open() 亦必须拒绝打开
+    await chat.open()
+    check(
+      'calling open() while a modal dialog is active is rejected',
+      chat.isOpen() === false && chat.overlay?.dataset.dsceOpen === 'false',
+      String(chat.overlay?.dataset.dsceOpen),
+    )
+
+    // 关闭/移除设置弹窗后，自动恢复展示
+    modalOverlay.remove()
+    chat.syncToHost()
+    check(
+      'closing the modal dialog restores the chat surface',
+      chat.isOpen() === true && chat.overlay?.dataset.dsceOpen === 'true',
+      String(chat.overlay?.dataset.dsceOpen),
+    )
+
+    // ---- 官方桌面版（Electron）必须零干预：遮罩天然盖住聊天，hide 反而是回归 ----
+    // Electron 下聊天是 DOM <webview>，住在 .dsce-overlay（z-index 200）里，
+    // 官方设置遮罩 z-index 1000 本就盖在它上面——聊天在遮罩下依稀可见正是官方
+    // 交互。此处若跟着 hide，聊天会整个消失（overlay display:none），是回归。
+    // 摘掉 __TAURI__ 再给 dshDesktop：排除歧义，确保测的确实是 electron 分支
+    // （两个都在时 Electron 在 GUEST_ADAPTERS 里排前，但那不该是隐含依赖）。
+    delete win.__TAURI__
+    win.dshDesktop = {
+      browser: {
+        acquire: async () => ({ lease: 'l1', partition: 'p1' }),
+        release: async () => {},
+      },
+    }
+    check('in Electron, resolveGuestAdapter resolves ElectronGuestAdapter', face.resolveGuestAdapter()?.id === 'electron')
+    doc.body.appendChild(modalOverlay)
+    chat.syncToHost()
+    check(
+      'in official Electron desktop, an active modal does not hide the surface (mask covers it natively)',
+      chat.isOpen() === true && chat.overlay?.dataset.dsceOpen === 'true',
+      String(chat.overlay?.dataset.dsceOpen),
+    )
+    await chat.open()
+    check(
+      'in Electron, open() during a modal still shows the surface',
+      chat.isOpen() === true && chat.overlay?.dataset.dsceOpen === 'true',
+      String(chat.overlay?.dataset.dsceOpen),
+    )
+    modalOverlay.remove()
+    delete win.dshDesktop
+
+    // ---- 无 adapter（web profile）同样不让位：浮层是 DOM，遮罩天然盖得住 ------
+    check('with no bridge, resolveGuestAdapter returns undefined', face.resolveGuestAdapter() === undefined)
+    doc.body.appendChild(modalOverlay)
+    chat.syncToHost()
+    check(
+      'in the web profile, an active modal does not hide the surface either',
+      chat.isOpen() === true && chat.overlay?.dataset.dsceOpen === 'true',
+      String(chat.overlay?.dataset.dsceOpen),
+    )
+    modalOverlay.remove()
+
+    await chat.destroy()
+    entry[1] = home
+    pane.remove()
+  }
+
   const failed = checks.filter((entry) => !entry.ok)
   process.stdout.write(`${JSON.stringify({ plugin: plugin.name, checks, ok: failed.length === 0 }, null, 2)}\n`)
   buttonRoot.unmount()

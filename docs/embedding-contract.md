@@ -317,3 +317,53 @@ Chromium 155（与 Electron 同引擎）实测，同样的 DOM + 同一份 CSS�
 DSH Dock（原生子视窗）侧同口径的防线在 `dsh-dock` 的
 `commands/chat_embed.rs::rect_is_placeable`：退化 rect（0 宽/0 高/NaN）一律让位，
 不再按「最小 100x100」摆一张谁也点不动的白卡。
+
+---
+
+## 11. 模态弹窗在场让位：主窗口弹窗弹出时原生子视窗必须隐藏（2026-10-15 现场故障）
+
+### 现象
+
+在 DSH Dock（基于 Tauri v2 + WebKit 的跨平台桌面客户端）中打开右侧栏 DeepSeek 聊天后，点击左下角用户头像或按快捷键打开「设置」弹窗：
+- 居中弹出的 800px 宽「设置」弹窗卡片右半部分被展开的 DeepSeek 聊天白底与内容完全遮挡；
+- 遮挡区域内的表单字段、操作按钮与关闭按钮无法看见、无法点击；
+- 点击右侧区域会被原生子视窗捕获，无法击中主窗口遮罩关闭弹窗。
+
+用户反馈：「这个 bug 还是没修复，右侧展开的 DeepSeek 聊天应该在设置弹窗的下层（设置弹窗应该在上层吧）」。
+
+### 根因
+
+DSH Dock 下为了绕过 CSP `frame-ancestors 'none'` 拦截并保证登录态持久，通过 Tauri 的 `main_win.add_child` 将 `https://chat.deepseek.com/` 挂载为顶层原生子 Webview（macOS 上为独立的 `WKWebView` / `NSView`）：
+- 原生子视窗在 OS 窗口图层树中位于主 Webview 之上，**完全脱离主页面 DOM 渲染树**；
+- 主页面内通过 `React.createPortal` 挂载至 `document.body` 的设置弹窗遮罩（`.VOzbGW_mask`）和弹窗卡片（`.VOzbGW_panel`，`z-index: 1000`）在 DOM 层面已是最高层级，但**无法跨越 OS 图层去遮挡原生子视窗**；
+- 插件原本的 `syncToHost()` 与生命周期中缺乏对主窗口模态弹窗的感知，在弹窗打开时依然维持原生子视窗的展示，导致子视窗直接将设置弹窗硬生生盖住。
+
+### 官方对照：分歧只在一处
+
+官方 Electron 桌面版的设置弹窗同样是「全视口遮罩 + 居中卡片」（`.VOzbGW_overlay{z-index:1000;position:fixed;inset:0}` + `.VOzbGW_mask{半透明+磨砂}` + `.VOzbGW_panel{z-index:1;width:800px}`），**对下层内容零特殊处理**。差别仅在于：官方聊天是 DOM `<webview>`，天然被遮罩盖住、在遮罩下依稀可见；Dock 聊天是原生视窗，遮罩盖不住。
+
+> **两个壳的目标不同，别混为一谈**：
+> - **Electron（官方桌面版）**：本节**不做任何事**——遮罩天然盖住聊天，视觉与官方逐像素同构；
+> - **Dock（Tauri）**：本节只保证「弹窗完整可用」这一功能性目标。**视觉上**弹窗期间右侧为空白，与官方「聊天在遮罩下可见」仍有差距——追平它需要把原生视窗的真实快照垫进 DOM（壳侧新增截图 IPC），属另一档复杂度，本节不做，也已在代码注释与测试里标明。
+
+### 修法（四段，缺一段就还能复现）
+
+1. **判定与策略分离**：
+   - `anyModalActive(doc)` 是**原始事实**判定：页面里有没有活动模态（`role="dialog"[aria-modal="true"]` / `role="alertdialog"` / `[data-shortcut-modal]` / `dialog[open]`），并排除插件自身浮层与宿主、过滤 `hidden`/`inert`/`display:none`；
+   - `EmbeddedChat#modalBlocksHost()` 是**策略**：当前宿主是否因此要让位。两者分开，是为了将来若出现不遮全屏的模态（如只盖左栏的抽屉），只需改策略一处，判定逻辑不动。
+2. **策略按宿主类型分流——不是所有壳都需要让位**：
+   - `tauri` / `custom`：聊天是原生子视窗，物理图层压在主页 Webview 之上，页面遮罩盖不住 → **必须让位**；
+   - `electron`：聊天是 DOM `<webview>`，住在 `.dsce-overlay`（`z-index:200`）里，官方设置遮罩 `z-index:1000` **天然就盖在它上面**，聊天在遮罩下依稀可见正是官方交互。此时若 `hide()`，反而会把聊天整个弄消失（`hide` 会把 overlay 的 `display` 置 `none`，而 Electron 侧 `setVisible` 是 no-op）——**那是回归，不是修复**；
+   - 无 adapter（web profile）：根本没有 guest，浮层同样是 DOM，同理不需要。
+   - 这条分流有回归测试钉住（Electron / 无桥两种环境下弹窗在场 surface 必须保持展开）。
+3. **三路入口强校验**：
+   - `syncToHost()`、`open()`、`syncOnScroll()` 在展示/几何计算前都先过 `modalBlocksHost()`，为真即 `hide()`（Dock 侧经 IPC `embed_chat_hide` → `wv.hide()`）；
+   - 三处都以 `if (this.visible)` 守卫：已经藏着就不再发一次 hide——那在 Dock 侧是一次白跑的 IPC。
+4. **DOM 变动即时接回（`watchModal`）**：
+   - `MutationObserver` 只看 `document.body` 的**直接**子节点（`subtree:false`）——DSH 的模态全部经 React Portal 挂到 body，深监听会撞上「终端每写一行触发一次文档级重排」那类事故（`watchChrome` 的同款教训：实测 1434 次 resize 全同一个 rect）；
+   - 监听**不解析节点、不猜 class 名**：上游弹窗 DOM 是私有结构，任何 `[class*="overlay"]` 式猜测都会在对方改版时静默失效。它只负责「有变动就去重新判定」，判定本身复用 `anyModalActive`，与滚动/缩放路径同一套语义；
+   - 弹窗退场后同一路监听触发 `syncToHost()`，走到方法末尾的 `open()` 经 `embed_chat_open`（`wv.show()`）原位接回，会话历史、输入草稿、滚动位置零损失。
+
+### 共享基座：`frameThrottle`
+
+chrome / modal / scroll 三条突发路径共用同一套「压到下一帧、一帧最多一次」的节流（`frameThrottle`）。三者的成本都是一次文档级测量或强制重排，逐次全跑就是插件自己记过的「1434 次 resize」那类事故——同 Dock 里其它 pane 都要替我们付账。无 rAF 环境退化成 16ms 定时器。
